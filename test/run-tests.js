@@ -14,12 +14,18 @@ async function main() {
   const analyst = ROLES.find((r) => r.id === 'analyst');
   const admin = ROLES.find((r) => r.id === 'admin');
   let passed = 0;
+  // Tests (sync or async) run sequentially on a promise chain so section
+  // headers and results stay in order.
+  let chain = Promise.resolve();
+  const section = (title) => { chain = chain.then(() => console.log(title)); };
   const test = (name, fn) => {
-    try { fn(); passed++; console.log(`  ✓ ${name}`); }
-    catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); process.exitCode = 1; }
+    chain = chain.then(async () => {
+      try { await fn(); passed++; console.log(`  ✓ ${name}`); }
+      catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); process.exitCode = 1; }
+    });
   };
 
-  console.log('SQL guardrail (§12.3)');
+  section('SQL guardrail (§12.3)');
   test('permits a valid SELECT on an approved view and applies the row limit', () => {
     const r = validateSql('SELECT company_name, SUM(closing_balance_amt) FROM RPT_FIN_GL_BALANCE_PERIOD_V GROUP BY company_name', { role: analyst });
     assert.ok(r.ok, r.errors.join('; '));
@@ -66,7 +72,7 @@ async function main() {
     assert.ok(r.ok, r.errors.join('; '));
   });
 
-  console.log('Prompt planner (§12.1, §14.1)');
+  section('Prompt planner (§12.1, §14.1)');
   const cases = [
     ['Show year-to-date revenue, operating cost and gross margin by company, with a monthly trend', 'fin-exec'],
     ['Which suppliers account for the largest overdue payables balance?', 'fin-ap'],
@@ -104,7 +110,7 @@ async function main() {
     assert.ok(plan.clarifications.length > 0);
   });
 
-  console.log('Insight engine (§10)');
+  section('Insight engine (§10)');
   test('variance decomposition reconciles to the total', () => {
     const rows = [
       { key: 'A', actual: 120, comparative: 100 },
@@ -135,7 +141,99 @@ async function main() {
     assert.ok(n.nextSteps.length >= 3);
   });
 
-  console.log('Catalogue integrity (§2.2)');
+  const {
+    testAdw, testOac, testAi, adwDictionary, intentForView, profileTable,
+    executeWorkbenchSql, sessionSecrets
+  } = await import('../src/renderer/js/connections.js');
+
+  const demoSettings = () => ({
+    mode: 'demo',
+    adw: { host: 'demo', serviceName: 'innovatia_low', access: 'readonly', walletFileName: '', username: 'INNOVATIA_RO_SVC' },
+    oac: { url: '', catalogRoot: '/Shared Folders/Custom', username: 'oac.pub' },
+    ai: { provider: 'claude', username: 'a@b.c', model: 'claude-opus-4-8' },
+    gateway: { url: 'https://gateway.innovatia.example', timeoutS: 5 },
+    rowLimit: 500
+  });
+
+  section('Connection tests');
+  test('ADW test fails without wallet/credentials', async () => {
+    sessionSecrets.adwPassword = ''; sessionSecrets.walletPath = '';
+    const r = await testAdw({ settings: demoSettings(), bridge: null });
+    assert.ok(!r.ok);
+    assert.match(r.detail, /Missing required/);
+  });
+  test('ADW test succeeds in demo with wallet + credentials; warns on read-write', async () => {
+    sessionSecrets.adwPassword = 'pw'; sessionSecrets.walletPath = '/tmp/wallet.zip';
+    const s = demoSettings();
+    let r = await testAdw({ settings: s, bridge: null });
+    assert.ok(r.ok, r.detail);
+    assert.match(r.detail, /READ-ONLY/);
+    s.adw.access = 'write';
+    r = await testAdw({ settings: s, bridge: null });
+    assert.ok(r.ok && r.warning && /read-only/i.test(r.warning));
+  });
+  test('OAC test requires username and password', async () => {
+    sessionSecrets.oacPassword = '';
+    let r = await testOac({ settings: demoSettings(), bridge: null });
+    assert.ok(!r.ok);
+    sessionSecrets.oacPassword = 'pw';
+    r = await testOac({ settings: demoSettings(), bridge: null });
+    assert.ok(r.ok, r.detail);
+  });
+  test('AI connector (Claude) requires account + API key', async () => {
+    sessionSecrets.aiKey = '';
+    let r = await testAi({ settings: demoSettings(), bridge: null });
+    assert.ok(!r.ok);
+    sessionSecrets.aiKey = 'sk-ant-xxx';
+    r = await testAi({ settings: demoSettings(), bridge: null });
+    assert.ok(r.ok && r.detail.includes('claude-opus-4-8'), r.detail);
+  });
+
+  section('ADW dictionary & table-insight dashboards');
+  test('dictionary exposes only INNOVATIA_RPT to dashboards', () => {
+    const dict = adwDictionary();
+    assert.ok(dict.find((d) => d.schema === 'INNOVATIA_RPT')?.exposed);
+    for (const d of dict.filter((x) => x.schema !== 'INNOVATIA_RPT')) assert.ok(!d.exposed);
+    assert.strictEqual(dict.find((d) => d.schema === 'INNOVATIA_RPT').tables.length, VIEWS.length);
+  });
+  test('every RPT view resolves to a governed dashboard intent', () => {
+    for (const v of VIEWS) assert.ok(intentForView(v.name), v.name);
+  });
+  test('profileTable yields insight + intent for RPT views, none for CORE tables', () => {
+    const dict = adwDictionary();
+    const rpt = dict[0].tables.find((t) => t.name === 'RPT_FIN_AP_AGEING_V');
+    const p = profileTable(rpt);
+    assert.ok(p.insight.length >= 3 && p.intentId === 'fin-ap');
+    const core = dict.find((d) => d.schema === 'INNOVATIA_CORE').tables[0];
+    assert.strictEqual(profileTable(core), null);
+  });
+
+  section('SQL Workbench lanes');
+  test('governed lane returns rows for a valid SELECT', async () => {
+    const r = await executeWorkbenchSql('SELECT supplier_name, outstanding_amt FROM RPT_FIN_AP_AGEING_V', { role: analyst, settings: demoSettings() });
+    assert.ok(r.ok && r.lane === 'governed' && r.rows.length > 0, JSON.stringify(r.errors));
+  });
+  test('DML is rejected for non-admin roles', async () => {
+    const r = await executeWorkbenchSql('DELETE FROM RPT_FIN_AP_AGEING_V', { role: analyst, settings: demoSettings() });
+    assert.ok(!r.ok && r.errors[0].includes('Platform Administrator'));
+  });
+  test('DML is rejected for admin on a read-only connection', async () => {
+    const r = await executeWorkbenchSql('UPDATE FCT_GL_BALANCE SET budget_amt = 0', { role: admin, settings: demoSettings() });
+    assert.ok(!r.ok && r.errors[0].includes('read-only'));
+  });
+  test('DDL/DML run on the engineering lane for admin + read-write, with audit warning', async () => {
+    const s = demoSettings(); s.adw.access = 'write';
+    const ddl = await executeWorkbenchSql('CREATE TABLE STG_TEST (id NUMBER)', { role: admin, settings: s });
+    assert.ok(ddl.ok && ddl.lane === 'engineering' && ddl.warning, JSON.stringify(ddl));
+    const dml = await executeWorkbenchSql("UPDATE STG_TEST SET id = 1", { role: admin, settings: s });
+    assert.ok(dml.ok && /rows? affected/.test(dml.message));
+  });
+  test('governed lane still blocks unapproved objects', async () => {
+    const r = await executeWorkbenchSql('SELECT * FROM RAW_BICC_GL_EXTRACT', { role: analyst, settings: demoSettings() });
+    assert.ok(!r.ok);
+  });
+
+  section('Catalogue integrity (§2.2)');
   test('every view carries the mandatory reporting contract fields', () => {
     for (const v of VIEWS) {
       assert.ok(v.grain && v.owner && v.refresh && v.drill, `${v.name} missing contract fields`);
@@ -144,6 +242,7 @@ async function main() {
     }
   });
 
+  await chain;
   console.log(`\n${passed} tests passed${process.exitCode ? ' (with failures)' : ''}.`);
 }
 

@@ -13,5 +13,7 @@ contextBridge.exposeInMainWorld('innovatia', {
   getSettings: () => ipcRenderer.invoke('store:getSettings'),
   saveSettings: (s) => ipcRenderer.invoke('store:saveSettings', s),
   exportFile: (payload) => ipcRenderer.invoke('app:exportFile', payload),
+  pickFile: (opts) => ipcRenderer.invoke('app:pickFile', opts),
+  httpTest: (opts) => ipcRenderer.invoke('conn:httpTest', opts),
   version: () => ipcRenderer.invoke('app:version')
 });

@@ -87,6 +87,37 @@ function registerIpc() {
   });
 
   ipcMain.handle('app:version', () => app.getVersion());
+
+  ipcMain.handle('app:pickFile', async (_evt, { title, filters }) => {
+    const win = BrowserWindow.getFocusedWindow();
+    const { canceled, filePaths } = await dialog.showOpenDialog(win, {
+      title: title || 'Select file',
+      properties: ['openFile'],
+      filters: filters || [{ name: 'All files', extensions: ['*'] }]
+    });
+    if (canceled || !filePaths.length) return { ok: false, canceled: true };
+    return { ok: true, filePath: filePaths[0] };
+  });
+
+  // Connection tests run in the main process (the renderer's CSP blocks
+  // outbound requests by design). Reachability/auth handshake only —
+  // credentials are sent as request headers and never logged or persisted.
+  ipcMain.handle('conn:httpTest', async (_evt, { url, method = 'GET', headers = {}, timeoutMs = 8000 }) => {
+    const started = Date.now();
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== 'https:') {
+        return { ok: false, error: 'Only HTTPS endpoints are permitted (§12.3).' };
+      }
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      const res = await fetch(url, { method, headers, signal: controller.signal, redirect: 'manual' });
+      clearTimeout(timer);
+      return { ok: res.status < 400, status: res.status, latencyMs: Date.now() - started };
+    } catch (e) {
+      return { ok: false, error: e.name === 'AbortError' ? `Timed out after ${timeoutMs} ms` : e.message, latencyMs: Date.now() - started };
+    }
+  });
 }
 
 function createWindow() {

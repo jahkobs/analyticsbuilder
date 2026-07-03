@@ -17,7 +17,7 @@ narratives and controlled Oracle Analytics Cloud releases.
 | Secure ADW querying | **SQL guardrail** — SELECT-only, approved `RPT_*`/`SEC_*` catalogue views only, DDL/DML/PL-SQL/db-links/unsafe packages rejected, sensitive columns blocked, row limit enforced (`src/renderer/js/guardrail.js`; interactive tester under *Security & Governance*) |
 | Drill path | Company → cost centre → natural account → journal evidence, plus the six other conformed hierarchies (§4.1), restricted to catalogued routes |
 | Advanced insight | Variance decomposition, least-squares forecast with confidence band, anomaly flags, §10.2-style narrative quoting only calculated drivers, advisory recommendation cards (`src/renderer/js/insights.js`) |
-| OAC publication | Template-led release workflow: approved template + catalog path + ACLs → pending approval → approver releases; full release record (dashboard ID, template, semantic-model version, owner, approver, path, timestamp) |
+| OAC publication | Template-led release workflow: approved template + catalog path + ACLs → pending approval → on approval the dashboard is **deployed directly into the configured OAC instance**; full release record (dashboard ID, template, semantic-model version, owner, approver, path, target instance, timestamps) |
 | Data trust | Every dashboard carries the governance footer: source view, data owner, refresh batch/status, quality %, security context, definition version |
 | Audit | Every prompt, generated SQL, validation, drill, save, publication request and approval is logged; visible to Administrator / Internal Control roles only |
 | Windows packaging | NSIS installer built by `electron-builder` (see below) |
@@ -29,14 +29,39 @@ lives in `src/renderer/js/catalog.js` and is the only surface the AI planner
 and guardrail can reference — `RAW_*`/`STG_*`/`FCT_*` objects are never
 exposed.
 
+## Connections (all with Test connection buttons)
+
+- **Oracle ADW** — read-only (dashboards/AI) or read-write (engineering)
+  access modes, mTLS wallet file browser, username/password. After a
+  successful test, the **ADW schema browser** unlocks: browse
+  `INNOVATIA_RPT` / `_CORE` / `_STG` / `_RAW` schemas and tables, inspect
+  columns and the per-table **data insight profile** (measures, dimensions,
+  grain, row volume, refresh, quality), and build a dashboard directly from
+  a governed table's insights.
+- **Oracle Analytics Cloud** — instance URL, catalog root, username/password.
+  Approved dashboards deploy straight into this instance.
+- **AI connection** — the governed InnovatIA Gateway (recommended), or a
+  simple connector for **Claude (Anthropic)** / **ChatGPT (OpenAI)** with
+  account + API key. Every provider remains behind the SQL guardrail and
+  audit trail.
+
+Passwords, API keys and the wallet are held in memory for the session only —
+never persisted to disk or the installer (§12.3: use OCI Vault in production).
+
+## SQL Workbench
+
+Query ADW directly. All roles run governed SELECTs (same guardrail as the AI
+planner, secure-view masking included). **DDL/DML** executes on the
+engineering lane, which requires the Platform Administrator role **and** a
+read-write ADW connection; every statement is audited.
+
 ## Execution modes
 
 - **Demo (offline)** — default. A deterministic synthetic dataset lets you
-  exercise the entire journey (ask → understand → generate → investigate →
-  save → publish → monitor) with no connection.
-- **Live** — configure the InnovatIA AI Gateway, ADW (read-only service
-  account; wallet/password held in OCI Vault — **never** stored in the app
-  or installer) and OAC endpoints under *Connections*.
+  exercise the entire journey (connect → browse schemas → ask/build →
+  investigate → save → publish → deploy) with no connection.
+- **Live** — the same requests execute against the configured gateway, ADW
+  and OAC endpoints over authenticated HTTPS.
 
 ## Development
 

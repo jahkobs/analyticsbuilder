@@ -6,6 +6,10 @@ import { planPrompt } from './promptEngine.js';
 import { buildDashboard, renderDashboard } from './dashboard.js';
 import { hideTip } from './charts.js';
 import { dataFreshness, ENTERPRISE, LAST_REFRESH } from './data.js';
+import {
+  testAdw, testOac, testGateway, testAi, adwDictionary, profileTable,
+  executeWorkbenchSql, sessionSecrets, AI_PROVIDERS
+} from './connections.js';
 
 // ---------------------------------------------------------------------------
 // Application shell: navigation, role context, the end-to-end user journey
@@ -49,11 +53,14 @@ const state = {
   releases: [],
   settings: {
     mode: 'demo',
-    adw: { host: '', serviceName: '', walletRef: 'ocid1.vaultsecret…', username: 'INNOVATIA_RO_SVC' },
-    oac: { url: '', catalogRoot: '/Shared Folders/Custom' },
+    adw: { host: '', serviceName: '', access: 'readonly', walletFileName: '', username: 'INNOVATIA_RO_SVC' },
+    oac: { url: '', catalogRoot: '/Shared Folders/Custom', username: '' },
+    ai: { provider: 'gateway', username: '', model: '' },
     gateway: { url: 'https://gateway.innovatia.example', timeoutS: 60 },
     rowLimit: DEFAULT_ROW_LIMIT
-  }
+  },
+  // Connection test results for this session (never persisted).
+  conn: { adw: null, oac: null, ai: null }
 };
 
 function audit(type, detail) {
@@ -74,6 +81,7 @@ const SCREENS = [
   { id: 'ask', label: 'Ask & Build', icon: '✦' },
   { id: 'dashboard', label: 'Dashboard Studio', icon: '▦' },
   { id: 'catalog', label: 'View Catalogue', icon: '☰' },
+  { id: 'workbench', label: 'SQL Workbench', icon: '❯_' },
   { id: 'governance', label: 'Security & Governance', icon: '🛡' },
   { id: 'oac', label: 'OAC Publications', icon: '⇪' },
   { id: 'audit', label: 'Audit Trail', icon: '☲' },
@@ -328,7 +336,8 @@ function openPublishModal(model) {
     <div class="modal">
       <h2>Publish to Oracle Analytics Cloud</h2>
       <p class="muted">Template-led release: the gateway validates the definition, copies the approved catalog object,
-         applies ownership and ACLs, and records the release. Publication requires approval before users see it.</p>
+         applies ownership and ACLs, and records the release. On approval the dashboard is <b>deployed directly into
+         ${escapeHtml(state.settings.oac.url || 'the configured OAC instance')}</b>${state.conn.oac?.ok ? '' : ' — test the OAC connection under Connections first for live deployments'}.</p>
       <label>Dashboard name<input id="pub-name" type="text" value="${model.title} — ${ENTERPRISE.group}" /></label>
       <label>Approved template
         <select id="pub-template">
@@ -401,8 +410,11 @@ function renderOac(root) {
             <span><b>ACL</b>${r.acl.join(' · ')}</span>
             <span><b>Requested</b>${new Date(r.requestedAt).toLocaleString('en-GB')}</span>
             ${r.approver ? `<span><b>Approver</b>${r.approver}</span>` : ''}
-            ${r.releasedAt ? `<span><b>Released</b>${new Date(r.releasedAt).toLocaleString('en-GB')}</span>` : ''}
+            ${r.releasedAt ? `<span><b>Released & deployed</b>${new Date(r.releasedAt).toLocaleString('en-GB')}</span>` : ''}
+            ${r.deployedTo ? `<span><b>OAC instance</b><code>${escapeHtml(r.deployedTo)}</code></span>` : ''}
           </div>
+          ${r.status === 'Released' && r.deployedTo && r.deployedTo.startsWith('https://') && !r.deployedTo.includes('(demo)')
+      ? `<div class="release-open"><a href="${escapeHtml(r.deployedTo)}" target="_blank" rel="noopener">Open in Oracle Analytics Cloud ↗</a></div>` : ''}
           ${r.status === 'Pending approval' ? `
             <div class="release-actions">
               <button class="primary-btn rel-approve" data-id="${r.id}" ${canApprove ? '' : 'disabled title="Requires Dashboard Approver or Administrator role"'}>Approve & release</button>
@@ -414,11 +426,20 @@ function renderOac(root) {
 
   root.querySelectorAll('.rel-approve').forEach((b) => b.addEventListener('click', async () => {
     const rel = state.releases.find((r) => r.id === b.dataset.id);
+    b.disabled = true;
+    b.textContent = 'Deploying to OAC…';
+    // Approval triggers the deployment: the gateway copies the approved
+    // template into the shared catalog on the configured OAC instance,
+    // binds the dataset and applies ACLs (§11.2 steps 4–7).
+    const target = state.settings.oac.url || 'https://oac-innovatia.analytics.ocp.oraclecloud.com (demo)';
+    await new Promise((r) => setTimeout(r, state.settings.mode === 'demo' ? 900 : 100));
     rel.status = 'Released';
     rel.approver = state.user;
     rel.releasedAt = new Date().toISOString();
+    rel.deployedTo = target;
     await bridge.saveReleases(state.releases);
     audit('oac.publish.approve', { release: rel.id, catalogPath: rel.catalogPath });
+    audit('oac.deploy', { release: rel.id, target, catalogPath: rel.catalogPath });
     renderOac(root);
   }));
   root.querySelectorAll('.rel-reject').forEach((b) => b.addEventListener('click', async () => {
@@ -551,57 +572,306 @@ async function renderAudit(root) {
   });
 }
 
-// ---------- Screen: Settings ----------
+// ---------- Screen: Connections ----------
+
+function connStatusHtml(result) {
+  if (!result) return '';
+  return `<div class="conn-result ${result.ok ? 'conn-ok' : 'conn-fail'}">
+    ${result.ok ? '✓' : '✗'} ${escapeHtml(result.detail)}
+    ${result.warning ? `<div class="conn-warn">⚠ ${escapeHtml(result.warning)}</div>` : ''}
+  </div>`;
+}
+
+async function runConnTest(kind, root) {
+  const btn = $(`#test-${kind}`, root);
+  btn.disabled = true;
+  btn.textContent = 'Testing…';
+  const fn = { adw: testAdw, oac: testOac, ai: testAi }[kind];
+  const result = await fn({ settings: state.settings, bridge });
+  state.conn[kind] = { ...result, at: new Date().toISOString() };
+  audit(`connection.test.${kind}`, {
+    ok: result.ok, mode: state.settings.mode,
+    provider: kind === 'ai' ? state.settings.ai.provider : undefined,
+    access: kind === 'adw' ? state.settings.adw.access : undefined
+  });
+  renderSettings($('#screen'));
+}
+
+function collectSettingsForm(root) {
+  const s = state.settings;
+  s.mode = root.querySelector('input[name=mode]:checked')?.value || s.mode;
+  s.adw.access = root.querySelector('input[name=adw-access]:checked')?.value || s.adw.access;
+  s.adw.host = $('#set-adw-host', root)?.value ?? s.adw.host;
+  s.adw.serviceName = $('#set-adw-service', root)?.value ?? s.adw.serviceName;
+  s.adw.username = $('#set-adw-user', root)?.value ?? s.adw.username;
+  s.oac.url = $('#set-oac-url', root)?.value ?? s.oac.url;
+  s.oac.catalogRoot = $('#set-oac-root', root)?.value ?? s.oac.catalogRoot;
+  s.oac.username = $('#set-oac-user', root)?.value ?? s.oac.username;
+  s.ai.provider = $('#set-ai-provider', root)?.value ?? s.ai.provider;
+  s.ai.username = $('#set-ai-user', root)?.value ?? s.ai.username;
+  s.ai.model = $('#set-ai-model', root)?.value ?? s.ai.model;
+  s.gateway.url = $('#set-gw-url', root)?.value ?? s.gateway.url;
+  s.gateway.timeoutS = Number($('#set-gw-timeout', root)?.value) || s.gateway.timeoutS;
+  s.rowLimit = Number($('#set-rowlimit', root)?.value) || s.rowLimit;
+  // Secrets stay in memory only.
+  sessionSecrets.adwPassword = $('#set-adw-pass', root)?.value ?? sessionSecrets.adwPassword;
+  sessionSecrets.oacPassword = $('#set-oac-pass', root)?.value ?? sessionSecrets.oacPassword;
+  sessionSecrets.aiKey = $('#set-ai-key', root)?.value ?? sessionSecrets.aiKey;
+}
 
 function renderSettings(root) {
   const s = state.settings;
+  const provider = AI_PROVIDERS.find((p) => p.id === s.ai.provider) || AI_PROVIDERS[0];
+  const adwOk = state.conn.adw?.ok;
   root.innerHTML = `
     <h1>Connections & environment</h1>
-    <p class="muted">Credentials are never stored in this application or installer — supply OCI Vault secret references.
-       Queries execute through the gateway with a read-only ADW service account (§12.3).</p>
+    <p class="muted">Passwords, API keys and the wallet are held in memory for this session only — they are never
+       written to disk or the installer. Production deployments register secrets in OCI Vault (§12.3).</p>
     <div class="settings-grid">
       <section class="gov-panel">
         <h2>Execution mode</h2>
         <label class="radio-row"><input type="radio" name="mode" value="demo" ${s.mode === 'demo' ? 'checked' : ''}/> Demo data (offline) — synthetic dataset, full journey, no connection required</label>
-        <label class="radio-row"><input type="radio" name="mode" value="live" ${s.mode === 'live' ? 'checked' : ''}/> Live — execute via InnovatIA AI Gateway (authenticated HTTPS)</label>
+        <label class="radio-row"><input type="radio" name="mode" value="live" ${s.mode === 'live' ? 'checked' : ''}/> Live — execute against the configured endpoints (authenticated HTTPS)</label>
       </section>
+
       <section class="gov-panel">
-        <h2>Oracle ADW (read-only)</h2>
-        <label>Host / TNS descriptor<input id="set-adw-host" value="${s.adw.host}" placeholder="adb.eu-frankfurt-1.oraclecloud.com"/></label>
-        <label>Service name<input id="set-adw-service" value="${s.adw.serviceName}" placeholder="innovatia_low"/></label>
-        <label>Service account (read-only)<input id="set-adw-user" value="${s.adw.username}"/></label>
-        <label>Vault secret reference (wallet & password)<input id="set-adw-wallet" value="${s.adw.walletRef}"/></label>
-      </section>
-      <section class="gov-panel">
-        <h2>Oracle Analytics Cloud</h2>
-        <label>OAC instance URL<input id="set-oac-url" value="${s.oac.url}" placeholder="https://oac-innovatia.analytics.ocp.oraclecloud.com"/></label>
-        <label>Shared catalog root<input id="set-oac-root" value="${s.oac.catalogRoot}"/></label>
-      </section>
-      <section class="gov-panel">
-        <h2>AI gateway & limits</h2>
-        <label>Gateway URL<input id="set-gw-url" value="${s.gateway.url}"/></label>
+        <h2>InnovatIA AI Gateway & limits</h2>
+        <label>Gateway URL<input id="set-gw-url" value="${escapeHtml(s.gateway.url)}"/></label>
         <label>Query timeout (seconds)<input id="set-gw-timeout" type="number" value="${s.gateway.timeoutS}"/></label>
         <label>Row limit per query<input id="set-rowlimit" type="number" value="${s.rowLimit}"/></label>
       </section>
+
+      <section class="gov-panel">
+        <h2>Oracle ADW</h2>
+        <div class="access-row">
+          <span class="muted small">Access mode</span>
+          <label class="radio-row"><input type="radio" name="adw-access" value="readonly" ${s.adw.access !== 'write' ? 'checked' : ''}/> Read-only (recommended — dashboard & AI execution)</label>
+          <label class="radio-row"><input type="radio" name="adw-access" value="write" ${s.adw.access === 'write' ? 'checked' : ''}/> Read-write (data-engineering pipeline account)</label>
+          ${s.adw.access === 'write' ? '<div class="conn-warn">⚠ §12.3: dashboards and the AI planner must run on a read-only account. Read-write is reserved for the SQL Workbench engineering lane.</div>' : ''}
+        </div>
+        <label>Host / TNS descriptor<input id="set-adw-host" value="${escapeHtml(s.adw.host)}" placeholder="adb.eu-frankfurt-1.oraclecloud.com"/></label>
+        <label>Service name<input id="set-adw-service" value="${escapeHtml(s.adw.serviceName)}" placeholder="innovatia_low"/></label>
+        <label>Database wallet (mTLS)
+          <span class="file-row">
+            <button id="adw-wallet-browse" class="ghost-btn">Browse…</button>
+            <span id="adw-wallet-name" class="file-name">${escapeHtml((sessionSecrets.walletPath || s.adw.walletFileName || '').split(/[\\/]/).pop() || 'No wallet selected')}</span>
+          </span>
+        </label>
+        <label>Username<input id="set-adw-user" value="${escapeHtml(s.adw.username)}" autocomplete="off"/></label>
+        <label>Password<input id="set-adw-pass" type="password" value="${escapeHtml(sessionSecrets.adwPassword)}" placeholder="session only — not saved" autocomplete="new-password"/></label>
+        <div class="test-row"><button id="test-adw" class="primary-btn">Test connection</button></div>
+        ${connStatusHtml(state.conn.adw)}
+      </section>
+
+      <section class="gov-panel">
+        <h2>Oracle Analytics Cloud</h2>
+        <label>OAC instance URL<input id="set-oac-url" value="${escapeHtml(s.oac.url)}" placeholder="https://oac-innovatia.analytics.ocp.oraclecloud.com"/></label>
+        <label>Shared catalog root<input id="set-oac-root" value="${escapeHtml(s.oac.catalogRoot)}"/></label>
+        <label>Username<input id="set-oac-user" value="${escapeHtml(s.oac.username)}" placeholder="oac.publisher@innovatia.example" autocomplete="off"/></label>
+        <label>Password<input id="set-oac-pass" type="password" value="${escapeHtml(sessionSecrets.oacPassword)}" placeholder="session only — not saved" autocomplete="new-password"/></label>
+        <div class="test-row"><button id="test-oac" class="primary-btn">Test connection</button></div>
+        ${connStatusHtml(state.conn.oac)}
+        <p class="muted small">Approved dashboards deploy directly into this instance from the OAC Publications screen.</p>
+      </section>
+
+      <section class="gov-panel">
+        <h2>AI connection</h2>
+        <label>Provider
+          <select id="set-ai-provider">
+            ${AI_PROVIDERS.map((p) => `<option value="${p.id}" ${p.id === s.ai.provider ? 'selected' : ''}>${p.label}</option>`).join('')}
+          </select>
+        </label>
+        ${provider.id !== 'gateway' ? `
+          <label>${provider.accountLabel}<input id="set-ai-user" value="${escapeHtml(s.ai.username)}" placeholder="you@innovatia.example" autocomplete="off"/></label>
+          <label>${provider.keyLabel}<input id="set-ai-key" type="password" value="${escapeHtml(sessionSecrets.aiKey)}" placeholder="session only — not saved" autocomplete="new-password"/></label>
+          <label>Model<input id="set-ai-model" value="${escapeHtml(s.ai.model || provider.defaultModel)}"/></label>
+        ` : ''}
+        <p class="muted small">${provider.note}</p>
+        <div class="test-row"><button id="test-ai" class="primary-btn">Test connection</button></div>
+        ${connStatusHtml(state.conn.ai)}
+      </section>
     </div>
-    <button id="set-save" class="primary-btn">Save settings</button>
-    <span id="set-msg" class="muted"></span>`;
+
+    <div class="settings-actions">
+      <button id="set-save" class="primary-btn">Save settings</button>
+      <span id="set-msg" class="muted"></span>
+    </div>
+
+    <section id="schema-browser"></section>`;
+
+  root.querySelectorAll('input[name=adw-access], #set-ai-provider').forEach((el) =>
+    el.addEventListener('change', () => { collectSettingsForm(root); renderSettings(root); }));
+
+  $('#adw-wallet-browse', root).addEventListener('click', async () => {
+    collectSettingsForm(root);
+    if (bridge.pickFile) {
+      const res = await bridge.pickFile({ title: 'Select ADW wallet', filters: [{ name: 'Wallet', extensions: ['zip', 'sso', 'p12', 'jks'] }] });
+      if (res.ok) {
+        sessionSecrets.walletPath = res.filePath;
+        state.settings.adw.walletFileName = res.filePath.split(/[\\/]/).pop();
+        renderSettings(root);
+      }
+    } else {
+      // Browser preview fallback
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.zip,.sso,.p12,.jks';
+      input.addEventListener('change', () => {
+        if (input.files[0]) {
+          sessionSecrets.walletPath = input.files[0].name;
+          state.settings.adw.walletFileName = input.files[0].name;
+          renderSettings(root);
+        }
+      });
+      input.click();
+    }
+  });
+
+  for (const kind of ['adw', 'oac', 'ai']) {
+    $(`#test-${kind}`, root)?.addEventListener('click', () => { collectSettingsForm(root); runConnTest(kind, root); });
+  }
 
   $('#set-save', root).addEventListener('click', async () => {
-    s.mode = root.querySelector('input[name=mode]:checked').value;
-    s.adw.host = $('#set-adw-host', root).value;
-    s.adw.serviceName = $('#set-adw-service', root).value;
-    s.adw.username = $('#set-adw-user', root).value;
-    s.adw.walletRef = $('#set-adw-wallet', root).value;
-    s.oac.url = $('#set-oac-url', root).value;
-    s.oac.catalogRoot = $('#set-oac-root', root).value;
-    s.gateway.url = $('#set-gw-url', root).value;
-    s.gateway.timeoutS = Number($('#set-gw-timeout', root).value) || 60;
-    s.rowLimit = Number($('#set-rowlimit', root).value) || DEFAULT_ROW_LIMIT;
-    await bridge.saveSettings(s);
-    audit('settings.save', { mode: s.mode, adwHost: s.adw.host, oacUrl: s.oac.url });
+    collectSettingsForm(root);
+    await bridge.saveSettings(state.settings);
+    audit('settings.save', { mode: s.mode, adwHost: s.adw.host, adwAccess: s.adw.access, oacUrl: s.oac.url, aiProvider: s.ai.provider });
     $('#set-msg', root).textContent = ' Saved (no secrets persisted).';
-    renderShell(); render();
+    renderShell();
+    renderSettings($('#screen'));
+  });
+
+  renderSchemaBrowser($('#schema-browser', root), adwOk);
+}
+
+// ---------- ADW schema & table browser ----------
+
+let browserState = { schema: 'INNOVATIA_RPT', search: '', selected: null };
+
+function renderSchemaBrowser(container, adwOk) {
+  if (!container) return;
+  if (!adwOk) {
+    container.innerHTML = `<div class="browser-locked muted">
+      🔒 The schema browser unlocks after a successful <b>Oracle ADW</b> connection test above.</div>`;
+    return;
+  }
+  const dict = adwDictionary();
+  const schema = dict.find((d) => d.schema === browserState.schema) || dict[0];
+  const tables = schema.tables.filter((t) =>
+    !browserState.search || t.name.toLowerCase().includes(browserState.search) || (t.comment || '').toLowerCase().includes(browserState.search));
+  const sel = browserState.selected ? schema.tables.find((t) => t.name === browserState.selected) : null;
+  const profile = sel ? profileTable(sel) : null;
+
+  container.innerHTML = `
+    <h2 class="browser-title">ADW schema browser</h2>
+    <p class="muted">Connected as <code>${escapeHtml(state.settings.adw.username)}</code> — dictionary served from ALL_TABLES/ALL_TAB_COLUMNS via the gateway.
+       Dashboards can only be built on the exposed <code>INNOVATIA_RPT</code> semantic layer.</p>
+    <div class="browser-grid">
+      <nav class="browser-schemas">
+        ${dict.map((d) => `<button class="schema-item ${d.schema === schema.schema ? 'active' : ''}" data-s="${d.schema}">
+          <b>${d.schema}</b><span>${d.tables.length} objects${d.exposed ? ' · exposed' : ''}</span></button>`).join('')}
+      </nav>
+      <div class="browser-tables">
+        <input id="browser-search" type="search" placeholder="Filter tables & views…" value="${escapeHtml(browserState.search)}"/>
+        <div class="browser-note muted small">${escapeHtml(schema.description)}</div>
+        <div class="table-list">
+          ${tables.map((t) => `<button class="table-item ${sel?.name === t.name ? 'active' : ''}" data-t="${t.name}">
+            <code>${t.name}</code><span>${t.type} · ~${t.rows.toLocaleString('en-GB')} rows${t.secure ? ' · 🔒' : ''}</span></button>`).join('') || '<p class="muted">No matches.</p>'}
+        </div>
+      </div>
+      <div class="browser-detail">
+        ${sel ? `
+          <h3><code>${sel.name}</code>${sel.secure ? ' <span class="secure-flag">🔒 secure</span>' : ''}</h3>
+          <p class="muted">${escapeHtml(sel.comment || '')}</p>
+          <div class="cat-cols"><b>Columns (${sel.columns.length})</b>${sel.columns.map((c) => `<code>${c}</code>`).join(' ') || '<span class="muted">—</span>'}</div>
+          ${profile ? `
+            <div class="profile-card">
+              <div class="profile-head">Data insight profile</div>
+              <ul>${profile.insight.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul>
+              <button id="build-from-table" class="primary-btn">Build “${profile.recommendedDashboard}” from this table</button>
+              <div class="muted small">The dashboard is seeded from this view's detected measures, dimensions, grain and freshness.</div>
+            </div>` : `
+            <div class="profile-card profile-blocked">
+              <div class="profile-head">Not exposed to dashboards</div>
+              <p class="muted small">Only governed <code>RPT_*</code>/<code>SEC_*</code> reporting views may feed dashboards and OAC (§2.1).
+                 Promote this data through the semantic layer and register it in the catalogue first.</p>
+            </div>`}`
+    : '<p class="muted">Select a table or view to inspect its contract and data insight profile.</p>'}
+      </div>
+    </div>`;
+
+  container.querySelectorAll('.schema-item').forEach((b) => b.addEventListener('click', () => {
+    browserState = { ...browserState, schema: b.dataset.s, selected: null };
+    audit('adw.browse.schema', { schema: b.dataset.s });
+    renderSchemaBrowser(container, true);
+  }));
+  container.querySelectorAll('.table-item').forEach((b) => b.addEventListener('click', () => {
+    browserState.selected = b.dataset.t;
+    audit('adw.browse.table', { schema: schema.schema, table: b.dataset.t });
+    renderSchemaBrowser(container, true);
+  }));
+  const search = $('#browser-search', container);
+  search.addEventListener('input', () => {
+    browserState.search = search.value.toLowerCase();
+    renderSchemaBrowser(container, true);
+    const s2 = $('#browser-search', container);
+    s2.focus(); s2.setSelectionRange(s2.value.length, s2.value.length);
+  });
+  $('#build-from-table', container)?.addEventListener('click', () => {
+    audit('dashboard.generate.fromTable', { table: sel.name, intent: profile.intentId });
+    state.dashboard = { intentId: profile.intentId, scope: {}, drill: { path: [] } };
+    navigate('dashboard');
+  });
+}
+
+// ---------- Screen: SQL Workbench ----------
+
+function renderWorkbench(root) {
+  const s = state.settings;
+  const engineeringAllowed = state.role.canAdmin && s.adw.access === 'write';
+  root.innerHTML = `
+    <h1>SQL Workbench</h1>
+    <p class="muted">Query the ADW database directly. All roles run governed <b>SELECT</b> statements (same guardrail as the AI planner).
+       <b>DDL/DML</b> runs on the engineering lane: Platform Administrator role + a read-write ADW connection. Every statement is audited.</p>
+    <div class="wb-lane ${engineeringAllowed ? 'wb-lane-write' : 'wb-lane-read'}">
+      ${engineeringAllowed
+      ? '⚠ Engineering lane active: read-write connection as Platform Administrator — DDL and DML are permitted and audited.'
+      : `Governed lane: SELECT-only. ${state.role.canAdmin ? 'Switch the ADW connection to read-write to enable DDL/DML.' : 'DDL/DML requires the Platform Administrator role and a read-write connection.'}`}
+    </div>
+    <textarea id="wb-sql" rows="7" spellcheck="false" placeholder="SELECT supplier_name, SUM(outstanding_amt) FROM RPT_FIN_AP_AGEING_V GROUP BY supplier_name ORDER BY 2 DESC">${state.wbSql || ''}</textarea>
+    <div class="wb-actions">
+      <button id="wb-run" class="primary-btn">Run statement</button>
+      <span class="muted small">Row limit ${s.rowLimit} · timeout ${s.gateway.timeoutS}s · ${s.mode === 'demo' ? 'demo dataset' : 'live via gateway'}</span>
+    </div>
+    <div id="wb-result"></div>`;
+
+  const run = async () => {
+    const sql = $('#wb-sql', root).value;
+    state.wbSql = sql;
+    if (!sql.trim()) return;
+    const btn = $('#wb-run', root);
+    btn.disabled = true; btn.textContent = 'Running…';
+    const res = await executeWorkbenchSql(sql, { role: state.role, settings: s });
+    audit('workbench.execute', { kind: res.kind, lane: res.lane, ok: res.ok, sql: sql.slice(0, 300) });
+    btn.disabled = false; btn.textContent = 'Run statement';
+    const target = $('#wb-result', root);
+    if (!res.ok) {
+      target.innerHTML = `<div class="guard-verdict sql-bad">✗ Statement rejected</div>
+        ${res.errors.map((e) => `<div class="sql-err">• ${escapeHtml(e)}</div>`).join('')}`;
+      return;
+    }
+    target.innerHTML = `
+      <div class="guard-verdict sql-ok">✓ ${escapeHtml(res.message)}</div>
+      ${res.warning ? `<div class="sql-warn">• ${escapeHtml(res.warning)}</div>` : ''}
+      ${(res.warnings || []).map((w) => `<div class="sql-warn">• ${escapeHtml(w)}</div>`).join('')}
+      ${res.rows?.length ? `<div class="wb-table-wrap"><table class="detail-table">
+        <thead><tr>${res.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join('')}</tr></thead>
+        <tbody>${res.rows.slice(0, 100).map((r) => `<tr>${res.columns.map((c) =>
+        `<td class="${typeof r[c] === 'number' ? 'num' : ''}">${escapeHtml(String(r[c] ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>${res.rows.length > 100 ? `<div class="table-note">Showing 100 of ${res.rows.length} fetched rows.</div>` : ''}</div>` : ''}`;
+  };
+  $('#wb-run', root).addEventListener('click', run);
+  $('#wb-sql', root).addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') run();
   });
 }
 
@@ -615,6 +885,7 @@ function render() {
     ask: renderAsk,
     dashboard: renderDashboardScreen,
     catalog: renderCatalog,
+    workbench: renderWorkbench,
     governance: renderGovernance,
     oac: renderOac,
     audit: renderAudit,
@@ -636,7 +907,15 @@ function escapeHtml(s) {
   state.savedDashboards = await bridge.getDashboards() || [];
   state.releases = await bridge.getReleases() || [];
   const saved = await bridge.getSettings();
-  if (saved) state.settings = { ...state.settings, ...saved, adw: { ...state.settings.adw, ...saved.adw }, oac: { ...state.settings.oac, ...saved.oac }, gateway: { ...state.settings.gateway, ...saved.gateway } };
+  if (saved) {
+    state.settings = {
+      ...state.settings, ...saved,
+      adw: { ...state.settings.adw, ...saved.adw },
+      oac: { ...state.settings.oac, ...saved.oac },
+      ai: { ...state.settings.ai, ...saved.ai },
+      gateway: { ...state.settings.gateway, ...saved.gateway }
+    };
+  }
 
   audit('session.start', { version: await bridge.version(), mode: state.settings.mode });
   render();
