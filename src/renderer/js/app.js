@@ -4,6 +4,7 @@ import { DOMAINS, ROLES, VIEWS, DRILL_HIERARCHIES, OAC_TEMPLATES, PROMPT_LIBRARY
 import { validateSql, DEFAULT_ROW_LIMIT } from './guardrail.js';
 import { planPrompt } from './promptEngine.js';
 import { buildDashboard, renderDashboard } from './dashboard.js';
+import { hideTip } from './charts.js';
 import { dataFreshness, ENTERPRISE, LAST_REFRESH } from './data.js';
 
 // ---------------------------------------------------------------------------
@@ -607,6 +608,7 @@ function renderSettings(root) {
 // ---------- Render dispatcher ----------
 
 function render() {
+  hideTip();
   renderShell();
   const root = $('#screen');
   ({
