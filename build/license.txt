@@ -1,0 +1,14 @@
+InnovatIA Analytics Builder
+© 2026 InnovatIA Ltd. All rights reserved.
+
+This software is licensed for use by authorised InnovatIA Ltd personnel and
+customers under the terms of the applicable master services agreement.
+
+The application executes read-only, governed queries only. It must be
+connected to Oracle Autonomous Data Warehouse through a read-only service
+account and to Oracle Analytics Cloud through the approved gateway. Do not
+store database credentials or wallets alongside this executable; use OCI
+Vault or your approved enterprise vault.
+
+All prompts, generated SQL, query executions, drill actions, approvals and
+OAC publications performed with this software are logged for audit purposes.

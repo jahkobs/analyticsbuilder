@@ -1,0 +1,40 @@
+appId: com.innovatia.analyticsbuilder
+productName: InnovatIA Analytics Builder
+copyright: © 2026 InnovatIA Ltd
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - src/**/*
+  - package.json
+
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  icon: build/icon.ico
+  # The canonical build runs on a Windows agent (see .github/workflows/
+  # build-installer.yml), where exe resource stamping works natively. When
+  # building from Linux without wine, pass -c.win.signAndEditExecutable=false.
+  # Code signing: configure WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD (or
+  # azureSignOptions) on the build agent — never store certificates in-repo.
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  artifactName: InnovatIA-Analytics-Builder-Setup-${version}.${ext}
+  shortcutName: InnovatIA Analytics Builder
+  uninstallDisplayName: InnovatIA Analytics Builder
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  license: build/license.txt
+
+linux:
+  target:
+    - AppImage
+  category: Office

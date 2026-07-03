@@ -1,0 +1,19 @@
+{
+  "name": "innovatia-analytics-builder",
+  "productName": "InnovatIA Analytics Builder",
+  "version": "1.0.0",
+  "description": "Governed enterprise analytics desktop studio for Oracle Fusion Finance, HCM, Supply Chain and CX — ADW reporting-view catalogue, AI dashboard design and OAC publication.",
+  "author": "InnovatIA Ltd",
+  "license": "UNLICENSED",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "node test/run-tests.js",
+    "dist:win": "electron-builder --win nsis --x64",
+    "dist:linux": "electron-builder --linux AppImage --x64"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  }
+}
