@@ -23,7 +23,7 @@ import {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Session-only secrets (never written through saveSettings).
-export const sessionSecrets = { adwPassword: '', oacPassword: '', walletPath: '', aiKey: '' };
+export const sessionSecrets = { adwPassword: '', oacPassword: '', walletPath: '', walletPassword: '', aiKey: '' };
 
 // Supported AI connectors. "gateway" is the governed enterprise route; the
 // direct Claude / ChatGPT connectors are for evaluation deployments — every
@@ -54,11 +54,12 @@ function require_(fields) {
   return missing.length ? `Missing required field${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}.` : null;
 }
 
+const writeWarning = 'Read-write access violates the platform control (§12.3): dashboard execution must use a read-only service account. Reserve read-write for the data-engineering pipeline user and the SQL Workbench engineering lane.';
+
 export async function testAdw({ settings, bridge }) {
   const s = settings.adw;
   const err = require_({
-    'host / TNS descriptor': s.host || (settings.mode === 'demo' ? 'demo' : ''),
-    'service name': s.serviceName || (settings.mode === 'demo' ? 'demo' : ''),
+    'service name / connect string': s.serviceName || s.host || (settings.mode === 'demo' ? 'demo' : ''),
     'wallet file': sessionSecrets.walletPath || s.walletFileName,
     username: s.username,
     password: sessionSecrets.adwPassword
@@ -72,19 +73,26 @@ export async function testAdw({ settings, bridge }) {
       detail: `Connected to Oracle ADW 19c — service ${s.serviceName || 'innovatia_low'} as ${s.username} `
         + `(${s.access === 'write' ? 'READ-WRITE' : 'READ-ONLY'}, mTLS wallet ${walletName(s)})`,
       latencyMs: 700,
-      warning: s.access === 'write'
-        ? 'Read-write access violates the platform control (§12.3): dashboard execution must use a read-only service account. Write access should be reserved for the data-engineering pipeline user.'
-        : null
+      warning: s.access === 'write' ? writeWarning : null
     };
   }
-  const res = await bridge.httpTest({ url: `${trimSlash(settings.gateway.url)}/api/v1/adw/test`, timeoutMs: settings.gateway.timeoutS * 1000 });
+
+  // Live mode connects DIRECTLY to ADW from the desktop client — no gateway.
+  if (!bridge.adwTest) {
+    return { ok: false, detail: 'Direct ADW connectivity is only available in the packaged desktop app (this is the browser preview).' };
+  }
+  const started = Date.now();
+  const res = await bridge.adwTest({
+    adw: { username: s.username, serviceName: s.serviceName, host: s.host, access: s.access, walletPassword: sessionSecrets.walletPassword || '' },
+    walletPath: sessionSecrets.walletPath || s.walletFileName,
+    password: sessionSecrets.adwPassword,
+    timeoutMs: settings.gateway.timeoutS * 1000
+  });
   return {
     ok: res.ok,
-    detail: res.ok
-      ? `Gateway verified the ADW handshake (HTTP ${res.status}, ${res.latencyMs} ms).`
-      : `ADW test failed via gateway: ${res.error || `HTTP ${res.status}`}. The desktop client always connects through the gateway — verify the gateway URL and that the wallet secret is registered in the vault.`,
-    latencyMs: res.latencyMs,
-    warning: s.access === 'write' ? 'Read-write access violates the platform control (§12.3): use a read-only service account for dashboards.' : null
+    detail: res.detail,
+    latencyMs: Date.now() - started,
+    warning: res.ok && s.access === 'write' ? writeWarning : null
   };
 }
 
@@ -330,7 +338,22 @@ function statementKind(sql) {
  * Execute a workbench statement. Returns
  * { ok, lane, kind, message, columns?, rows?, errors? }.
  */
-export async function executeWorkbenchSql(sql, { role, settings }) {
+// Run a statement against the live ADW connection (direct, via the main
+// process). Returns null when not in live mode / no driver, so callers fall
+// back to the demo dataset.
+async function runLive(sql, { settings, bridge, maxRows }) {
+  if (settings.mode !== 'live' || !bridge?.adwQuery) return null;
+  const s = settings.adw;
+  return bridge.adwQuery({
+    adw: { username: s.username, serviceName: s.serviceName, host: s.host, access: s.access, walletPassword: sessionSecrets.walletPassword || '' },
+    walletPath: sessionSecrets.walletPath || s.walletFileName,
+    password: sessionSecrets.adwPassword,
+    sql, maxRows: maxRows || settings.rowLimit,
+    timeoutMs: settings.gateway.timeoutS * 1000
+  });
+}
+
+export async function executeWorkbenchSql(sql, { role, settings, bridge }) {
   const kind = statementKind(sql);
   const engineering = kind === 'DML' || kind === 'DDL' || /\bBEGIN\b|\bDECLARE\b/i.test(sql);
 
@@ -338,7 +361,7 @@ export async function executeWorkbenchSql(sql, { role, settings }) {
     if (!role.canAdmin) {
       return {
         ok: false, lane: 'governed', kind,
-        errors: [`${kind} statements require the Platform Administrator role. Dashboard and analyst access is SELECT-only through the gateway (§12.3).`]
+        errors: [`${kind} statements require the Platform Administrator role. Dashboard and analyst access is SELECT-only (§12.3).`]
       };
     }
     if (settings.adw.access !== 'write') {
@@ -347,13 +370,15 @@ export async function executeWorkbenchSql(sql, { role, settings }) {
         errors: ['The ADW connection is read-only. Switch the connection to read-write under Connections → Oracle ADW to run DDL/DML (engineering pipeline account).']
       };
     }
-    await sleep(settings.mode === 'demo' ? 500 : 50);
-    const affected = kind === 'DDL' ? 0 : seededRows(sql, 1, 4200);
+    const live = await runLive(sql, { settings, bridge });
+    if (live && !live.ok) return { ok: false, lane: 'engineering', kind, errors: [`ADW: ${live.error}`] };
+    await sleep(live ? 0 : (settings.mode === 'demo' ? 500 : 50));
+    const affected = live ? live.rowsAffected : (kind === 'DDL' ? 0 : seededRows(sql, 1, 4200));
     return {
       ok: true, lane: 'engineering', kind,
       message: kind === 'DDL'
-        ? `${statementKind(sql)} statement executed${settings.mode === 'demo' ? ' (demo simulation — no database attached)' : ''}. Object catalogued; remember to register new RPT_/SEC_ views in the governed catalogue before exposing them to dashboards.`
-        : `${affected.toLocaleString('en-GB')} row${affected === 1 ? '' : 's'} affected${settings.mode === 'demo' ? ' (demo simulation — no database attached)' : ''}.`,
+        ? `${kind} statement executed${live ? ' on ADW' : (settings.mode === 'demo' ? ' (demo simulation — no database attached)' : '')}. Object catalogued; remember to register new RPT_/SEC_ views in the governed catalogue before exposing them to dashboards.`
+        : `${affected.toLocaleString('en-GB')} row${affected === 1 ? '' : 's'} affected${live ? ' on ADW' : (settings.mode === 'demo' ? ' (demo simulation — no database attached)' : '')}.`,
       warning: 'Executed on the engineering (read-write) lane. This statement is outside dashboard governance and has been written to the audit trail.'
     };
   }
@@ -362,21 +387,31 @@ export async function executeWorkbenchSql(sql, { role, settings }) {
   const validation = validateSql(sql, { role, rowLimit: settings.rowLimit });
   if (!validation.ok) return { ok: false, lane: 'governed', kind, errors: validation.errors };
 
-  await sleep(settings.mode === 'demo' ? 350 : 50);
   const viewName = validation.views[0]?.name;
   const view = VIEW_INDEX.get(viewName);
-  let rows = (DEMO_ROWSETS[viewName] ? DEMO_ROWSETS[viewName]() : genericRows(view)).slice(0, settings.rowLimit);
+
+  const live = await runLive(validation.sql, { settings, bridge });
+  if (live && !live.ok) return { ok: false, lane: 'governed', kind: 'SELECT', errors: [`ADW: ${live.error}`] };
+
+  let rows, columns;
+  if (live) {
+    rows = live.rows; columns = live.columns;
+  } else {
+    await sleep(settings.mode === 'demo' ? 350 : 50);
+    rows = (DEMO_ROWSETS[viewName] ? DEMO_ROWSETS[viewName]() : genericRows(view)).slice(0, settings.rowLimit);
+    columns = rows.length ? Object.keys(rows[0]) : [];
+  }
   if (view?.secure && !role.canSeeSecure) {
     rows = rows.map((r) => {
       const masked = { ...r };
-      for (const k of Object.keys(masked)) if (/name$/.test(k) && !/company|employer|department/.test(k)) masked[k] = '•••• masked ••••';
+      for (const k of Object.keys(masked)) if (/name$/i.test(k) && !/company|employer|department/i.test(k)) masked[k] = '•••• masked ••••';
       return masked;
     });
   }
   return {
     ok: true, lane: 'governed', kind: 'SELECT',
-    message: `${rows.length.toLocaleString('en-GB')} rows returned from ${viewName}${settings.mode === 'demo' ? ' (demo dataset)' : ''}.`,
-    columns: rows.length ? Object.keys(rows[0]) : [],
+    message: `${rows.length.toLocaleString('en-GB')} rows returned from ${viewName}${live ? ' (live ADW)' : (settings.mode === 'demo' ? ' (demo dataset)' : '')}.`,
+    columns,
     rows,
     warnings: validation.warnings
   };

@@ -9,8 +9,17 @@ directories:
 files:
   - src/**/*
   - package.json
+  # Bundle the optional Oracle driver when it installed. Used in "thin" mode
+  # (pure JavaScript — no Oracle client), so no native rebuild is required.
+  - node_modules/oracledb/**/*
 
 asar: true
+# oracledb ships a native addon (only used for thick mode, which we never
+# invoke); keep it outside asar so the package loads cleanly, and don't
+# rebuild native modules against Electron — thin mode needs no binary.
+asarUnpack:
+  - node_modules/oracledb/**/*
+npmRebuild: false
 
 win:
   target:

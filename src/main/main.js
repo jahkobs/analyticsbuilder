@@ -3,6 +3,7 @@
 const { app, BrowserWindow, ipcMain, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const adw = require('./adw');
 
 // ---------------------------------------------------------------------------
 // InnovatIA Analytics Builder — Electron main process
@@ -118,6 +119,12 @@ function registerIpc() {
       return { ok: false, error: e.name === 'AbortError' ? `Timed out after ${timeoutMs} ms` : e.message, latencyMs: Date.now() - started };
     }
   });
+
+  // Direct ADW connectivity — secrets (wallet path + password) are passed in
+  // per-call from the renderer's in-memory session store and never persisted.
+  ipcMain.handle('adw:test', (_evt, args) => adw.test(args));
+  ipcMain.handle('adw:query', (_evt, args) => adw.query(args));
+  ipcMain.handle('adw:driverAvailable', () => adw.driverAvailable());
 }
 
 function createWindow() {
@@ -154,6 +161,8 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+app.on('will-quit', () => { adw.closePool(); });
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

@@ -31,13 +31,18 @@ exposed.
 
 ## Connections (all with Test connection buttons)
 
-- **Oracle ADW** — read-only (dashboards/AI) or read-write (engineering)
-  access modes, mTLS wallet file browser, username/password. After a
-  successful test, the **ADW schema browser** unlocks: browse
-  `INNOVATIA_RPT` / `_CORE` / `_STG` / `_RAW` schemas and tables, inspect
-  columns and the per-table **data insight profile** (measures, dimensions,
-  grain, row volume, refresh, quality), and build a dashboard directly from
-  a governed table's insights.
+- **Oracle ADW** — connects **directly** from the desktop app (no gateway):
+  browse the mTLS wallet, enter the service name, username and password, and
+  Test connection. Live queries run through Oracle's official `node-oracledb`
+  driver in *thin* mode (pure JavaScript — no Oracle client install). The
+  host/port is auto-read from the wallet's `tnsnames.ora`; if the driver
+  isn't bundled the test falls back to a TLS reachability handshake so it
+  still returns a real result. Read-only (dashboards/AI) or read-write
+  (engineering) access modes. After a successful test, the **ADW schema
+  browser** unlocks: browse `INNOVATIA_RPT` / `_CORE` / `_STG` / `_RAW`
+  schemas and tables, inspect columns and the per-table **data insight
+  profile** (measures, dimensions, grain, row volume, refresh, quality), and
+  build a dashboard directly from a governed table's insights.
 - **Oracle Analytics Cloud** — instance URL, catalog root, username/password.
   Approved dashboards deploy straight into this instance.
 - **AI connection** — the governed InnovatIA Gateway (recommended), or a

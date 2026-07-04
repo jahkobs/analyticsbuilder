@@ -615,6 +615,7 @@ function collectSettingsForm(root) {
   s.rowLimit = Number($('#set-rowlimit', root)?.value) || s.rowLimit;
   // Secrets stay in memory only.
   sessionSecrets.adwPassword = $('#set-adw-pass', root)?.value ?? sessionSecrets.adwPassword;
+  sessionSecrets.walletPassword = $('#set-adw-walletpass', root)?.value ?? sessionSecrets.walletPassword;
   sessionSecrets.oacPassword = $('#set-oac-pass', root)?.value ?? sessionSecrets.oacPassword;
   sessionSecrets.aiKey = $('#set-ai-key', root)?.value ?? sessionSecrets.aiKey;
 }
@@ -631,7 +632,7 @@ function renderSettings(root) {
       <section class="gov-panel">
         <h2>Execution mode</h2>
         <label class="radio-row"><input type="radio" name="mode" value="demo" ${s.mode === 'demo' ? 'checked' : ''}/> Demo data (offline) — synthetic dataset, full journey, no connection required</label>
-        <label class="radio-row"><input type="radio" name="mode" value="live" ${s.mode === 'live' ? 'checked' : ''}/> Live — execute against the configured endpoints (authenticated HTTPS)</label>
+        <label class="radio-row"><input type="radio" name="mode" value="live" ${s.mode === 'live' ? 'checked' : ''}/> Live — connect directly to ADW (wallet) and the configured OAC / AI endpoints</label>
       </section>
 
       <section class="gov-panel">
@@ -649,17 +650,19 @@ function renderSettings(root) {
           <label class="radio-row"><input type="radio" name="adw-access" value="write" ${s.adw.access === 'write' ? 'checked' : ''}/> Read-write (data-engineering pipeline account)</label>
           ${s.adw.access === 'write' ? '<div class="conn-warn">⚠ §12.3: dashboards and the AI planner must run on a read-only account. Read-write is reserved for the SQL Workbench engineering lane.</div>' : ''}
         </div>
-        <label>Host / TNS descriptor<input id="set-adw-host" value="${escapeHtml(s.adw.host)}" placeholder="adb.eu-frankfurt-1.oraclecloud.com"/></label>
-        <label>Service name<input id="set-adw-service" value="${escapeHtml(s.adw.serviceName)}" placeholder="innovatia_low"/></label>
         <label>Database wallet (mTLS)
           <span class="file-row">
             <button id="adw-wallet-browse" class="ghost-btn">Browse…</button>
             <span id="adw-wallet-name" class="file-name">${escapeHtml((sessionSecrets.walletPath || s.adw.walletFileName || '').split(/[\\/]/).pop() || 'No wallet selected')}</span>
           </span>
         </label>
+        <label>Service name (TNS alias from the wallet)<input id="set-adw-service" value="${escapeHtml(s.adw.serviceName)}" placeholder="innovatia_low"/></label>
+        <label>Host / connect string <span class="muted small">(optional — auto-read from the wallet)</span><input id="set-adw-host" value="${escapeHtml(s.adw.host)}" placeholder="adb.eu-frankfurt-1.oraclecloud.com:1522/…"/></label>
         <label>Username<input id="set-adw-user" value="${escapeHtml(s.adw.username)}" autocomplete="off"/></label>
         <label>Password<input id="set-adw-pass" type="password" value="${escapeHtml(sessionSecrets.adwPassword)}" placeholder="session only — not saved" autocomplete="new-password"/></label>
+        <label>Wallet password <span class="muted small">(only if the wallet is encrypted)</span><input id="set-adw-walletpass" type="password" value="${escapeHtml(sessionSecrets.walletPassword)}" placeholder="session only — not saved" autocomplete="new-password"/></label>
         <div class="test-row"><button id="test-adw" class="primary-btn">Test connection</button></div>
+        <p class="muted small">The desktop app connects <b>directly</b> to ADW using your wallet + credentials — no gateway needed. Just pick the wallet, enter the service name, username and password.</p>
         ${connStatusHtml(state.conn.adw)}
       </section>
 
@@ -850,7 +853,7 @@ function renderWorkbench(root) {
     if (!sql.trim()) return;
     const btn = $('#wb-run', root);
     btn.disabled = true; btn.textContent = 'Running…';
-    const res = await executeWorkbenchSql(sql, { role: state.role, settings: s });
+    const res = await executeWorkbenchSql(sql, { role: state.role, settings: s, bridge });
     audit('workbench.execute', { kind: res.kind, lane: res.lane, ok: res.ok, sql: sql.slice(0, 300) });
     btn.disabled = false; btn.textContent = 'Run statement';
     const target = $('#wb-result', root);

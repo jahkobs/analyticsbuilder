@@ -188,6 +188,33 @@ async function main() {
     r = await testAi({ settings: demoSettings(), bridge: null });
     assert.ok(r.ok && r.detail.includes('claude-opus-4-8'), r.detail);
   });
+  test('live ADW test connects DIRECTLY via the bridge (no gateway)', async () => {
+    sessionSecrets.adwPassword = 'pw'; sessionSecrets.walletPath = '/tmp/w.zip';
+    const s = demoSettings(); s.mode = 'live';
+    let sawGateway = false, sawDirect = false;
+    const bridge = {
+      httpTest: async () => { sawGateway = true; return { ok: false, error: 'fetch failed' }; },
+      adwTest: async (a) => { sawDirect = true; return { ok: true, detail: `Connected directly to Oracle ADW as ${a.adw.username}. No gateway required.` }; }
+    };
+    const r = await testAdw({ settings: s, bridge });
+    assert.ok(r.ok && !sawGateway && sawDirect, 'must route to adwTest, not httpTest');
+    assert.ok(r.detail.includes('No gateway'));
+  });
+  test('live workbench SELECT executes on the direct ADW connection', async () => {
+    sessionSecrets.adwPassword = 'pw'; sessionSecrets.walletPath = '/tmp/w.zip';
+    const s = demoSettings(); s.mode = 'live';
+    const bridge = {
+      adwQuery: async ({ sql }) => ({ ok: true, columns: ['SUPPLIER_NAME', 'OUTSTANDING_AMT'], rows: [{ SUPPLIER_NAME: 'Volta', OUTSTANDING_AMT: 123 }], rowsAffected: 0, _sql: sql })
+    };
+    const r = await executeWorkbenchSql('SELECT supplier_name, outstanding_amt FROM RPT_FIN_AP_AGEING_V', { role: analyst, settings: s, bridge });
+    assert.ok(r.ok && r.rows.length === 1 && r.message.includes('live ADW'), JSON.stringify(r));
+  });
+  test('live ADW query error surfaces to the user', async () => {
+    const s = demoSettings(); s.mode = 'live';
+    const bridge = { adwQuery: async () => ({ ok: false, error: 'ORA-00942: table or view does not exist' }) };
+    const r = await executeWorkbenchSql('SELECT 1 FROM RPT_DIM_DATE_V', { role: analyst, settings: s, bridge });
+    assert.ok(!r.ok && r.errors[0].includes('ORA-00942'));
+  });
 
   section('ADW dictionary & table-insight dashboards');
   test('dictionary exposes only INNOVATIA_RPT to dashboards', () => {

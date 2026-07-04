@@ -15,5 +15,8 @@ contextBridge.exposeInMainWorld('innovatia', {
   exportFile: (payload) => ipcRenderer.invoke('app:exportFile', payload),
   pickFile: (opts) => ipcRenderer.invoke('app:pickFile', opts),
   httpTest: (opts) => ipcRenderer.invoke('conn:httpTest', opts),
+  adwTest: (opts) => ipcRenderer.invoke('adw:test', opts),
+  adwQuery: (opts) => ipcRenderer.invoke('adw:query', opts),
+  adwDriverAvailable: () => ipcRenderer.invoke('adw:driverAvailable'),
   version: () => ipcRenderer.invoke('app:version')
 });

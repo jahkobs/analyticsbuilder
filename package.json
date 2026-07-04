@@ -12,6 +12,9 @@
     "dist:win": "electron-builder --win nsis --x64",
     "dist:linux": "electron-builder --linux AppImage --x64"
   },
+  "optionalDependencies": {
+    "oracledb": "^6.9.0"
+  },
   "devDependencies": {
     "electron": "^33.2.1",
     "electron-builder": "^25.1.8"
